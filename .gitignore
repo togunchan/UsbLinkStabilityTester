@@ -1,0 +1,13 @@
+/build/
+out/
+bin/
+obj/
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.vcxproj.user
+*.log
+*.tmp
+*.DS_Store
