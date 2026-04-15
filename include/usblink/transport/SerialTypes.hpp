@@ -19,7 +19,11 @@ namespace usblink::transport{
 
     struct TransportResult{
         TransportStatus status;
-        std::string message;
+
+        bool isOk() const
+        {
+            return status == TransportStatus::Ok;
+        }
     };
 
     struct ReadResult
