@@ -95,4 +95,45 @@ namespace usblink::transport
         return isOpen_;
     }
 
+    WriteResult PosixSerialTransport::write(std::span<const std::uint8_t> data)
+    {
+        if (!isOpen())
+            return {TransportStatus::NotOpen};
+
+        size_t totalWritten = 0;
+
+        while (totalWritten < data.size())
+        {
+            ssize_t n = ::write(
+                fd_,
+                data.data() + totalWritten,
+                data.size() - totalWritten);
+
+            if (n > 0)
+            {
+                totalWritten += static_cast<size_t>(n);
+                continue;
+            }
+
+            // no data written -> rare case
+            if (n == 0)
+            {
+                return {TransportStatus::IoError, totalWritten};
+            }
+
+            // errno is set by the OS on failure (n < 0)
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            if (errno == EAGAIN)
+            {
+                return {TransportStatus::Timeout, totalWritten};
+            }
+
+            return {TransportStatus::IoError, totalWritten};
+        }
+    }
+
 } // namespace usblink::transport
