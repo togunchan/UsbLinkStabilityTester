@@ -9,6 +9,7 @@
 namespace usblink::transport
 {
     class ISerialTransport{
+    public:
         virtual ~ISerialTransport() = default;
 
         virtual TransportResult open(const SerialConfig &cfg) = 0;
