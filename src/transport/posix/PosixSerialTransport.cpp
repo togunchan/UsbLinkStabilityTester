@@ -132,25 +132,35 @@ namespace usblink::transport
 
     ReadResult PosixSerialTransport::read(std::span<std::uint8_t> buffer)
     {
-        if (isOpen())
+        if (!isOpen())
             return {TransportStatus::NotOpen, 0};
 
-        ssize_t n = ::read(fd_, buffer.data(), buffer.size());
+        size_t totalRead = 0;
 
-        if (n > 0)
-            return {TransportStatus::Ok, static_cast<size_t>(n)};
+        while (totalRead < buffer.size())
+        {
+            ssize_t n = ::read(fd_, buffer.data() + totalRead, buffer.size() - totalRead);
 
-        if (n == 0)
-            // device closed or no data
-            return {TransportStatus::IoError, 0};
+            if (n > 0)
+            {
+                totalRead += static_cast<size_t>(n);
+                continue;
+            }
 
-        // errno is set by the OS on failure (n < 0)
-        if (errno == EINTR)
-            return read(buffer);
+            if (n == 0)
+                // device closed or no data
+                return {TransportStatus::IoError, totalRead};
 
-        if (errno == EAGAIN)
-            return {TransportStatus::Timeout, 0};
+            // errno is set by the OS on failure (n < 0)
+            if (errno == EINTR)
+                continue;
 
-        return {TransportStatus::IoError, 0};
+            if (errno == EAGAIN)
+                return {TransportStatus::Timeout, totalRead};
+
+            return {TransportStatus::IoError, totalRead};
+        }
+
+        return {TransportStatus::Ok, totalRead};
     }
 } // namespace usblink::transport
