@@ -117,23 +117,40 @@ namespace usblink::transport
 
             // no data written -> rare case
             if (n == 0)
-            {
                 return {TransportStatus::IoError, totalWritten};
-            }
 
             // errno is set by the OS on failure (n < 0)
             if (errno == EINTR)
-            {
                 continue;
-            }
 
             if (errno == EAGAIN)
-            {
                 return {TransportStatus::Timeout, totalWritten};
-            }
 
             return {TransportStatus::IoError, totalWritten};
         }
     }
 
+    ReadResult PosixSerialTransport::read(std::span<std::uint8_t> buffer)
+    {
+        if (isOpen())
+            return {TransportStatus::NotOpen, 0};
+
+        ssize_t n = ::read(fd_, buffer.data(), buffer.size());
+
+        if (n > 0)
+            return {TransportStatus::Ok, static_cast<size_t>(n)};
+
+        if (n == 0)
+            // device closed or no data
+            return {TransportStatus::IoError, 0};
+
+        // errno is set by the OS on failure (n < 0)
+        if (errno == EINTR)
+            return read(buffer);
+
+        if (errno == EAGAIN)
+            return {TransportStatus::Timeout, 0};
+
+        return {TransportStatus::IoError, 0};
+    }
 } // namespace usblink::transport
