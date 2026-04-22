@@ -128,6 +128,7 @@ namespace usblink::transport
 
             return {TransportStatus::IoError, totalWritten};
         }
+        return {TransportStatus::Ok, totalWritten};
     }
 
     ReadResult PosixSerialTransport::read(std::span<std::uint8_t> buffer)
