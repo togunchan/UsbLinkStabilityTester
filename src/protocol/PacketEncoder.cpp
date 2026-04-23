@@ -2,7 +2,7 @@
 
 namespace usblink::protocol
 {
-    uint32_t computeCRC32(std::span<const uint8_t> data)
+    static uint32_t computeCRC32(std::span<const uint8_t> data)
     {
         uint32_t crc = 0xFFFFFFFF;
 
@@ -89,5 +89,37 @@ namespace usblink::protocol
 
         // -1 cast to size_t becomes max value (all bits set to 1) -> used as "not found"
         return static_cast<size_t>(-1);
+    }
+
+    bool tryParsePacket(std::vector<uint8_t> &buffer, PacketHeader &outHeader, std::vector<uint8_t> &outPayload)
+    {
+        size_t offset = findMagicOffset(buffer, MAGIC);
+
+        if (offset == static_cast<size_t>(-1))
+            return false;
+
+        if (offset > 0)
+            buffer.erase(buffer.begin(), buffer.begin() + offset);
+
+        if (buffer.size() < sizeof(PacketHeader))
+            return false;
+
+        PacketHeader hdr;
+        std::memcpy(&hdr, buffer.data(), sizeof(PacketHeader));
+
+        size_t totalSize = sizeof(PacketHeader) + hdr.payloadSize;
+
+        if (buffer.size() < totalSize)
+            return false;
+
+        outPayload.assign(
+            buffer.begin() + sizeof(PacketHeader),
+            buffer.begin() + totalSize);
+
+        outHeader = hdr;
+
+        buffer.erase(buffer.begin(), buffer.begin() + totalSize);
+
+        return true;
     }
 } // namespace usblink::protocol
