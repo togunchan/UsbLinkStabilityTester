@@ -1,6 +1,8 @@
 #include "usblink/protocol/PacketEncoder.hpp"
 
 #include <cstring>
+#include <bit>
+#include <array>
 
 namespace usblink::protocol
 {
@@ -32,15 +34,12 @@ namespace usblink::protocol
         std::vector<uint8_t> temp;
         temp.reserve(sizeof(PacketHeader) + payload.size());
 
-        // Treat the header as raw bytes.
-        // We're just viewing its memory as uint8_t,
-        // not copying it (like memcpy would).
-        const uint8_t *tempHeaderPtr = reinterpret_cast<const uint8_t *>(&hdr);
+        std::array<uint8_t, sizeof(PacketHeader)> headerBytes = std::bit_cast<std::array<uint8_t, sizeof(PacketHeader)>>(hdr);
 
         temp.insert(
             temp.end(),
-            tempHeaderPtr,
-            tempHeaderPtr + sizeof(PacketHeader));
+            headerBytes.begin(),
+            headerBytes.end());
 
         temp.insert(
             temp.end(),
@@ -55,12 +54,12 @@ namespace usblink::protocol
         // [HEADER][PAYLOAD]
         buffer.reserve(sizeof(PacketHeader) + payload.size());
 
-        const uint8_t *finalHeaderPtr = reinterpret_cast<const uint8_t *>(&hdr);
+        std::array<uint8_t, sizeof(PacketHeader)> finalHeaderBytes = std::bit_cast<std::array<uint8_t, sizeof(PacketHeader)>>(hdr);
 
         buffer.insert(
             buffer.end(),
-            finalHeaderPtr,
-            finalHeaderPtr + sizeof(PacketHeader));
+            finalHeaderBytes.begin(),
+            finalHeaderBytes.end());
 
         buffer.insert(
             buffer.end(),
