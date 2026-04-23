@@ -1,5 +1,7 @@
 #include "usblink/protocol/PacketEncoder.hpp"
 
+#include <cstring>
+
 namespace usblink::protocol
 {
     static uint32_t computeCRC32(std::span<const uint8_t> data)

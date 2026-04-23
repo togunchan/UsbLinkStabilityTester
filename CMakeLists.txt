@@ -9,6 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_library(usblink
     src/common/Dummy.cpp
+    src/protocol/PacketEncoder.cpp
 )
 
 target_include_directories(usblink
@@ -23,3 +24,43 @@ add_executable(usblink_app
 target_link_libraries(usblink_app
     PRIVATE usblink
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    set(USBLINK_THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
+    set(USBLINK_CATCH2_DIR "${USBLINK_THIRD_PARTY_DIR}/Catch2")
+
+    if(EXISTS "${USBLINK_CATCH2_DIR}/CMakeLists.txt")
+        set(CATCH_DEVELOPMENT_BUILD OFF CACHE BOOL "" FORCE)
+        set(CATCH_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+        set(CATCH_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(CATCH_BUILD_EXTRA_TESTS OFF CACHE BOOL "" FORCE)
+        set(CATCH_BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
+        set(CATCH_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+        set(CATCH_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
+        set(CATCH_INSTALL_EXTRAS OFF CACHE BOOL "" FORCE)
+
+        add_subdirectory(
+            "${USBLINK_CATCH2_DIR}"
+            "${CMAKE_BINARY_DIR}/third_party/Catch2"
+            EXCLUDE_FROM_ALL
+        )
+    else()
+        find_package(Catch2 3 REQUIRED)
+    endif()
+
+    add_executable(usblink_tests
+        tests/protocol/PacketParserTests.cpp
+    )
+
+    target_link_libraries(usblink_tests
+        PRIVATE
+            usblink
+            Catch2::Catch2WithMain
+    )
+
+    add_test(
+        NAME usblink_tests
+        COMMAND usblink_tests
+    )
+endif()
