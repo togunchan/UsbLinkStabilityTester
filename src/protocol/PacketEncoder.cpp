@@ -67,4 +67,27 @@ namespace usblink::protocol
 
         return buffer;
     }
+
+    size_t findMagicOffset(std::span<const uint8_t> buf, uint32_t magic)
+    {
+        // convert "uint32_t (4 btye) magic" into byte array
+        const uint8_t *m = reinterpret_cast<const uint8_t *>(&magic);
+
+        if (buf.size() < sizeof(uint32_t))
+            return static_cast<size_t>(-1);
+
+        for (size_t i = 0; i <= buf.size() - sizeof(uint32_t); ++i)
+        {
+            if (buf[i] == m[0] &&
+                buf[i + 1] == m[1] &&
+                buf[i + 2] == m[2] &&
+                buf[i + 3] == m[3])
+            {
+                return i;
+            }
+        }
+
+        // -1 cast to size_t becomes max value (all bits set to 1) -> used as "not found"
+        return static_cast<size_t>(-1);
+    }
 } // namespace usblink::protocol
