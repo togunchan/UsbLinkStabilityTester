@@ -71,8 +71,7 @@ namespace usblink::protocol
 
     size_t findMagicOffset(std::span<const uint8_t> buf, uint32_t magic)
     {
-        // convert "uint32_t (4 btye) magic" into byte array
-        const uint8_t *m = reinterpret_cast<const uint8_t *>(&magic);
+        std::array<uint8_t, sizeof(uint32_t)> m = std::bit_cast<std::array<uint8_t, sizeof(uint32_t)>>(magic);
 
         if (buf.size() < sizeof(uint32_t))
             return static_cast<size_t>(-1);
@@ -92,42 +91,103 @@ namespace usblink::protocol
         return static_cast<size_t>(-1);
     }
 
-    bool tryParsePacket(std::vector<uint8_t> &buffer, PacketHeader &outHeader, std::vector<uint8_t> &outPayload)
+    // Deprecated
+    // bool tryParsePacket(std::vector<uint8_t> &buffer, PacketHeader &outHeader, std::vector<uint8_t> &outPayload)
+    // {
+    //     size_t offset = findMagicOffset(buffer, MAGIC);
+
+    //     if (offset == static_cast<size_t>(-1))
+    //         return false;
+
+    //     if (offset > 0)
+    //         buffer.erase(buffer.begin(), buffer.begin() + offset);
+
+    //     if (buffer.size() < sizeof(PacketHeader))
+    //         return false;
+
+    //     PacketHeader hdr;
+    //     std::memcpy(&hdr, buffer.data(), sizeof(PacketHeader));
+
+    //     if (hdr.payloadSize > MAX_PAYLOAD_SIZE)
+    //     {
+    //         buffer.erase(buffer.begin());
+    //         return false;
+    //     }
+
+    //     size_t totalSize = sizeof(PacketHeader) + static_cast<size_t>(hdr.payloadSize);
+
+    //     if (totalSize < sizeof(PacketHeader))
+    //     {
+    //         buffer.erase(buffer.begin());
+    //         return false;
+    //     }
+
+    //     if (buffer.size() < totalSize)
+    //         return false;
+
+    //     outPayload.assign(
+    //         buffer.begin() + sizeof(PacketHeader),
+    //         buffer.begin() + totalSize);
+
+    //     PacketHeader tempHdr = hdr;
+    //     tempHdr.crc = 0;
+
+    //     std::vector<uint8_t> tempBuff;
+    //     tempBuff.reserve(totalSize);
+
+    //     std::array<uint8_t, sizeof(PacketHeader)> headerBytes = std::bit_cast<std::array<uint8_t, sizeof(PacketHeader)>>(tempHdr);
+
+    //     tempBuff.insert(tempBuff.end(), headerBytes.begin(), headerBytes.end());
+
+    //     tempBuff.insert(tempBuff.end(), buffer.begin() + sizeof(PacketHeader), buffer.begin() + totalSize);
+
+    //     uint32_t computedCRC = computeCRC32(tempBuff);
+
+    //     if (computedCRC != hdr.crc)
+    //     {
+    //         buffer.erase(buffer.begin());
+    //         return false;
+    //     }
+
+    //     outHeader = hdr;
+
+    //     buffer.erase(buffer.begin(), buffer.begin() + totalSize);
+
+    //     return true;
+    // }
+
+    bool tryParsePacket(std::vector<uint8_t> &buffer, size_t &cursor, PacketHeader &outHeader, std::vector<uint8_t> &outPayload)
     {
-        size_t offset = findMagicOffset(buffer, MAGIC);
+        if (cursor >= buffer.size())
+            return false;
+
+        size_t offset = findMagicOffset(std::span<const uint8_t>(buffer.begin() + cursor, buffer.end()), MAGIC);
 
         if (offset == static_cast<size_t>(-1))
             return false;
 
-        if (offset > 0)
-            buffer.erase(buffer.begin(), buffer.begin() + offset);
+        cursor += offset;
 
-        if (buffer.size() < sizeof(PacketHeader))
+        if (buffer.size() - cursor < sizeof(PacketHeader))
             return false;
 
         PacketHeader hdr;
-        std::memcpy(&hdr, buffer.data(), sizeof(PacketHeader));
+        std::memcpy(&hdr, buffer.data() + cursor, sizeof(PacketHeader));
 
         if (hdr.payloadSize > MAX_PAYLOAD_SIZE)
         {
-            buffer.erase(buffer.begin());
+            cursor += 1;
             return false;
         }
 
-        size_t totalSize = sizeof(PacketHeader) + static_cast<size_t>(hdr.payloadSize);
+        const size_t totalSize = sizeof(PacketHeader) + static_cast<size_t>(hdr.payloadSize);
 
-        if (totalSize < sizeof(PacketHeader))
-        {
-            buffer.erase(buffer.begin());
-            return false;
-        }
-
-        if (buffer.size() < totalSize)
+        if (buffer.size() - cursor < totalSize)
             return false;
 
         outPayload.assign(
-            buffer.begin() + sizeof(PacketHeader),
-            buffer.begin() + totalSize);
+            buffer.begin() + cursor + sizeof(PacketHeader),
+            buffer.begin() + cursor + totalSize);
 
         PacketHeader tempHdr = hdr;
         tempHdr.crc = 0;
@@ -135,24 +195,21 @@ namespace usblink::protocol
         std::vector<uint8_t> tempBuff;
         tempBuff.reserve(totalSize);
 
-        const uint8_t *hdrPtr = reinterpret_cast<const uint8_t *>(&tempHdr);
+        std::array<uint8_t, sizeof(PacketHeader)> hdrBytes = std::bit_cast<std::array<uint8_t, sizeof(PacketHeader)>>(tempHdr);
 
-        tempBuff.insert(tempBuff.end(), hdrPtr, hdrPtr + sizeof(PacketHeader));
+        tempBuff.insert(tempBuff.end(), hdrBytes.begin(), hdrBytes.end());
+        tempBuff.insert(tempBuff.end(), outPayload.begin(), outPayload.end());
 
-        tempBuff.insert(tempBuff.end(), buffer.begin() + sizeof(PacketHeader), buffer.begin() + totalSize);
+        uint32_t computed = computeCRC32(tempBuff);
 
-        uint32_t computedCRC = computeCRC32(tempBuff);
-
-        if (computedCRC != hdr.crc)
+        if (computed != hdr.crc)
         {
-            buffer.erase(buffer.begin());
+            cursor += 1;
             return false;
         }
 
         outHeader = hdr;
-
-        buffer.erase(buffer.begin(), buffer.begin() + totalSize);
-
+        cursor += totalSize;
         return true;
     }
 } // namespace usblink::protocol

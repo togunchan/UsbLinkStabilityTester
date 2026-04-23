@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -50,14 +51,15 @@ TEST_CASE("tryParsePacket parses a complete valid packet", "[protocol][parser]")
     std::vector<uint8_t> buffer = encoded;
     PacketHeader parsedHeader{};
     std::vector<uint8_t> parsedPayload;
+    size_t cursor = 0;
 
-    REQUIRE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
+    REQUIRE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
     REQUIRE(parsedHeader.magic == MAGIC);
     REQUIRE(parsedHeader.sequence == 42);
     REQUIRE(parsedHeader.timestamp == 1'700'000'000ULL);
     REQUIRE(parsedHeader.payloadSize == payload.size());
     REQUIRE(parsedPayload == payload);
-    REQUIRE(buffer.empty());
+    REQUIRE(cursor == buffer.size());
 }
 
 TEST_CASE("tryParsePacket waits when only a partial header is available", "[protocol][parser]")
@@ -73,8 +75,10 @@ TEST_CASE("tryParsePacket waits when only a partial header is available", "[prot
 
     PacketHeader parsedHeader{};
     std::vector<uint8_t> parsedPayload;
+    size_t cursor = 0;
 
-    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
+    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
+    REQUIRE(cursor == 0);
     REQUIRE(buffer.size() == partialHeaderSize);
 }
 
@@ -90,8 +94,10 @@ TEST_CASE("tryParsePacket waits for remaining payload bytes", "[protocol][parser
 
     PacketHeader parsedHeader{};
     std::vector<uint8_t> parsedPayload;
+    size_t cursor = 0;
 
-    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
+    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
+    REQUIRE(cursor == 0);
     REQUIRE(buffer.size() == incompleteSize);
 
     appendBytes(
@@ -100,12 +106,12 @@ TEST_CASE("tryParsePacket waits for remaining payload bytes", "[protocol][parser
             encoded.data() + incompleteSize,
             encoded.size() - incompleteSize));
 
-    REQUIRE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
+    REQUIRE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
     REQUIRE(parsedHeader.sequence == 8);
     REQUIRE(parsedHeader.timestamp == 8'888ULL);
     REQUIRE(parsedHeader.payloadSize == payload.size());
     REQUIRE(parsedPayload == payload);
-    REQUIRE(buffer.empty());
+    REQUIRE(cursor == buffer.size());
 }
 
 TEST_CASE("tryParsePacket skips garbage bytes before a valid packet", "[protocol][parser]")
@@ -117,15 +123,17 @@ TEST_CASE("tryParsePacket skips garbage bytes before a valid packet", "[protocol
 
     PacketHeader parsedHeader{};
     std::vector<uint8_t> parsedPayload;
+    size_t cursor = 0;
 
-    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
+    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
+    REQUIRE(cursor == 0);
 
     appendBytes(buffer, encoded);
 
-    REQUIRE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
+    REQUIRE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
     REQUIRE(parsedHeader.sequence == 9);
     REQUIRE(parsedPayload == payload);
-    REQUIRE(buffer.empty());
+    REQUIRE(cursor == buffer.size());
 }
 
 TEST_CASE("tryParsePacket rejects CRC-mismatched packet and resynchronizes", "[protocol][parser]")
@@ -143,18 +151,19 @@ TEST_CASE("tryParsePacket rejects CRC-mismatched packet and resynchronizes", "[p
 
     PacketHeader parsedHeader{};
     std::vector<uint8_t> parsedPayload;
+    size_t cursor = 0;
 
     const std::size_t initialSize = buffer.size();
-    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
-    REQUIRE(buffer.size() == initialSize - 1); // one-byte drop resync policy
+    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
+    REQUIRE(cursor == 1); // one-byte drop resync policy
 
     bool recovered = false;
     std::size_t attempts = 0;
-    const std::size_t maxAttempts = initialSize;
+    const std::size_t maxAttempts = initialSize * 2;
 
     while (!recovered && attempts < maxAttempts)
     {
-        recovered = usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload);
+        recovered = usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload);
         attempts++;
     }
 
@@ -163,6 +172,7 @@ TEST_CASE("tryParsePacket rejects CRC-mismatched packet and resynchronizes", "[p
     REQUIRE(parsedHeader.timestamp == 11'111ULL);
     REQUIRE(parsedHeader.payloadSize == goodPayload.size());
     REQUIRE(parsedPayload == goodPayload);
+    REQUIRE(cursor == buffer.size());
 }
 
 TEST_CASE("tryParsePacket returns at most one packet per call", "[protocol][parser]")
@@ -177,18 +187,25 @@ TEST_CASE("tryParsePacket returns at most one packet per call", "[protocol][pars
     appendBytes(buffer, packet1);
     appendBytes(buffer, packet2);
 
+    size_t cursor = 0;
     PacketHeader parsedHeader{};
     std::vector<uint8_t> parsedPayload;
 
-    REQUIRE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
-    REQUIRE(parsedHeader.sequence == 100);
-    REQUIRE(parsedPayload == payload1);
-    REQUIRE(!buffer.empty());
+    const std::array<uint32_t, 2> expectedSequences{100, 101};
+    const std::array<std::vector<uint8_t>, 2> expectedPayloads{payload1, payload2};
 
-    REQUIRE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
-    REQUIRE(parsedHeader.sequence == 101);
-    REQUIRE(parsedPayload == payload2);
-    REQUIRE(buffer.empty());
+    for (std::size_t i = 0; i < expectedSequences.size(); ++i)
+    {
+        const size_t before = cursor;
+        REQUIRE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
+        REQUIRE(cursor > before);
+        REQUIRE(parsedHeader.sequence == expectedSequences[i]);
+        REQUIRE(parsedPayload == expectedPayloads[i]);
+        if (i == 0)
+            REQUIRE(cursor < buffer.size());
+    }
+
+    REQUIRE(cursor == buffer.size());
 }
 
 TEST_CASE("tryParsePacket handles stream-split input and succeeds only when complete", "[protocol][parser]")
@@ -199,6 +216,7 @@ TEST_CASE("tryParsePacket handles stream-split input and succeeds only when comp
     const std::array<std::size_t, 5> chunkSizes{1, 4, 3, 2, 64};
 
     std::vector<uint8_t> buffer;
+    size_t cursor = 0;
     PacketHeader parsedHeader{};
     std::vector<uint8_t> parsedPayload;
 
@@ -217,7 +235,7 @@ TEST_CASE("tryParsePacket handles stream-split input and succeeds only when comp
                 bytesToCopy));
         consumed += bytesToCopy;
 
-        const bool parsed = usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload);
+        const bool parsed = usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload);
 
         if (consumed < encoded.size())
             REQUIRE_FALSE(parsed);
@@ -230,7 +248,7 @@ TEST_CASE("tryParsePacket handles stream-split input and succeeds only when comp
     REQUIRE(parsedHeader.timestamp == 55'555ULL);
     REQUIRE(parsedHeader.payloadSize == payload.size());
     REQUIRE(parsedPayload == payload);
-    REQUIRE(buffer.empty());
+    REQUIRE(cursor == buffer.size());
 }
 
 TEST_CASE("tryParsePacket does not treat magic bytes inside payload as a packet boundary", "[protocol][parser]")
@@ -252,25 +270,31 @@ TEST_CASE("tryParsePacket does not treat magic bytes inside payload as a packet 
     const std::size_t splitPoint = sizeof(PacketHeader) + 6;
     appendBytes(buffer, std::span<const uint8_t>(firstPacket.data(), splitPoint));
 
+    size_t cursor = 0;
     PacketHeader parsedHeader{};
     std::vector<uint8_t> parsedPayload;
 
-    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
+    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
+    REQUIRE(cursor == 0);
 
     appendBytes(
         buffer,
         std::span<const uint8_t>(firstPacket.data() + splitPoint, firstPacket.size() - splitPoint));
     appendBytes(buffer, secondPacket);
 
-    REQUIRE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
-    REQUIRE(parsedHeader.sequence == 600);
-    REQUIRE(parsedHeader.payloadSize == payloadWithMagic.size());
-    REQUIRE(parsedPayload == payloadWithMagic);
+    const std::array<uint32_t, 2> expectedSequences{600, 601};
+    const std::array<std::vector<uint8_t>, 2> expectedPayloads{payloadWithMagic, trailingPayload};
 
-    REQUIRE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
-    REQUIRE(parsedHeader.sequence == 601);
-    REQUIRE(parsedPayload == trailingPayload);
-    REQUIRE(buffer.empty());
+    for (std::size_t i = 0; i < expectedSequences.size(); ++i)
+    {
+        const size_t before = cursor;
+        REQUIRE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
+        REQUIRE(cursor > before);
+        REQUIRE(parsedHeader.sequence == expectedSequences[i]);
+        REQUIRE(parsedPayload == expectedPayloads[i]);
+    }
+
+    REQUIRE(cursor == buffer.size());
 }
 
 TEST_CASE("tryParsePacket parses zero-length payload packets", "[protocol][parser]")
@@ -283,12 +307,13 @@ TEST_CASE("tryParsePacket parses zero-length payload packets", "[protocol][parse
     std::vector<uint8_t> buffer = encoded;
     PacketHeader parsedHeader{};
     std::vector<uint8_t> parsedPayload{0xFF}; // ensure parser overwrites output state
+    size_t cursor = 0;
 
-    REQUIRE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
+    REQUIRE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
     REQUIRE(parsedHeader.sequence == 610);
     REQUIRE(parsedHeader.payloadSize == 0);
     REQUIRE(parsedPayload.empty());
-    REQUIRE(buffer.empty());
+    REQUIRE(cursor == buffer.size());
 }
 
 TEST_CASE("tryParsePacket accepts payload at MAX_PAYLOAD_SIZE boundary", "[protocol][parser]")
@@ -302,12 +327,13 @@ TEST_CASE("tryParsePacket accepts payload at MAX_PAYLOAD_SIZE boundary", "[proto
     std::vector<uint8_t> buffer = encoded;
     PacketHeader parsedHeader{};
     std::vector<uint8_t> parsedPayload;
+    size_t cursor = 0;
 
-    REQUIRE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
+    REQUIRE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
     REQUIRE(parsedHeader.sequence == 615);
     REQUIRE(parsedHeader.payloadSize == MAX_PAYLOAD_SIZE);
     REQUIRE(parsedPayload == maxPayload);
-    REQUIRE(buffer.empty());
+    REQUIRE(cursor == buffer.size());
 }
 
 TEST_CASE("tryParsePacket rejects payloadSize above MAX_PAYLOAD_SIZE and resynchronizes", "[protocol][parser]")
@@ -328,19 +354,19 @@ TEST_CASE("tryParsePacket rejects payloadSize above MAX_PAYLOAD_SIZE and resynch
     appendBytes(buffer, oversizedHeaderPacket);
     appendBytes(buffer, validPacket);
 
+    size_t cursor = 0;
     PacketHeader parsedHeader{};
     std::vector<uint8_t> parsedPayload;
 
-    const std::size_t initialSize = buffer.size();
-    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
-    REQUIRE(buffer.size() == initialSize - 1);
+    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
+    REQUIRE(cursor == 1);
 
     bool recovered = false;
     std::size_t attempts = 0;
-    const std::size_t maxAttempts = initialSize * 2;
+    const std::size_t maxAttempts = buffer.size() * 2;
     while (!recovered && attempts < maxAttempts)
     {
-        recovered = usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload);
+        recovered = usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload);
         attempts++;
     }
 
@@ -348,7 +374,7 @@ TEST_CASE("tryParsePacket rejects payloadSize above MAX_PAYLOAD_SIZE and resynch
     REQUIRE(parsedHeader.sequence == 617);
     REQUIRE(parsedHeader.payloadSize == validPayload.size());
     REQUIRE(parsedPayload == validPayload);
-    REQUIRE(buffer.empty());
+    REQUIRE(cursor == buffer.size());
 }
 
 TEST_CASE("tryParsePacket correctly parses a large payload stream", "[protocol][parser]")
@@ -360,6 +386,7 @@ TEST_CASE("tryParsePacket correctly parses a large payload stream", "[protocol][
     const auto encoded = makePacket(620, 62'000ULL, largePayload);
 
     std::vector<uint8_t> buffer;
+    size_t cursor = 0;
     PacketHeader parsedHeader{};
     std::vector<uint8_t> parsedPayload;
 
@@ -374,7 +401,7 @@ TEST_CASE("tryParsePacket correctly parses a large payload stream", "[protocol][
             std::span<const uint8_t>(encoded.data() + consumed, bytesToCopy));
         consumed += bytesToCopy;
 
-        const bool parsed = usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload);
+        const bool parsed = usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload);
         if (consumed < encoded.size())
             REQUIRE_FALSE(parsed);
         else
@@ -384,7 +411,7 @@ TEST_CASE("tryParsePacket correctly parses a large payload stream", "[protocol][
     REQUIRE(parsedHeader.sequence == 620);
     REQUIRE(parsedHeader.payloadSize == largePayload.size());
     REQUIRE(parsedPayload == largePayload);
-    REQUIRE(buffer.empty());
+    REQUIRE(cursor == buffer.size());
 }
 
 TEST_CASE("tryParsePacket recovers after multiple consecutive CRC failures", "[protocol][parser]")
@@ -412,17 +439,21 @@ TEST_CASE("tryParsePacket recovers after multiple consecutive CRC failures", "[p
     appendBytes(buffer, badPacket3);
     appendBytes(buffer, goodPacket);
 
+    size_t cursor = 0;
     PacketHeader parsedHeader{};
     std::vector<uint8_t> parsedPayload;
 
+    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
+    REQUIRE(cursor == 1);
+
     bool recovered = false;
-    std::size_t failedAttempts = 0;
-    std::size_t attempts = 0;
+    std::size_t failedAttempts = 1;
+    std::size_t attempts = 1;
     const std::size_t maxAttempts = buffer.size() * 2;
 
     while (!recovered && attempts < maxAttempts)
     {
-        recovered = usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload);
+        recovered = usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload);
         if (!recovered)
             failedAttempts++;
         attempts++;
@@ -432,6 +463,7 @@ TEST_CASE("tryParsePacket recovers after multiple consecutive CRC failures", "[p
     REQUIRE(failedAttempts >= 3);
     REQUIRE(parsedHeader.sequence == 633);
     REQUIRE(parsedPayload == goodPayload);
+    REQUIRE(cursor == buffer.size());
 }
 
 TEST_CASE("tryParsePacket remains stable when header fields are corrupted", "[protocol][parser]")
@@ -466,6 +498,7 @@ TEST_CASE("tryParsePacket remains stable when header fields are corrupted", "[pr
     appendBytes(buffer, badSizePacket);
     appendBytes(buffer, validPacket);
 
+    size_t cursor = 0;
     PacketHeader parsedHeader{};
     std::vector<uint8_t> parsedPayload;
 
@@ -474,13 +507,14 @@ TEST_CASE("tryParsePacket remains stable when header fields are corrupted", "[pr
     const std::size_t maxAttempts = buffer.size() * 2;
     while (!parsed && attempts < maxAttempts)
     {
-        parsed = usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload);
+        parsed = usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload);
         attempts++;
     }
 
     REQUIRE(parsed);
     REQUIRE(parsedHeader.sequence == 642);
     REQUIRE(parsedPayload == payloadC);
+    REQUIRE(cursor == buffer.size());
 }
 
 TEST_CASE("tryParsePacket handles exact buffer boundary sizes without off-by-one errors", "[protocol][parser]")
@@ -492,10 +526,12 @@ TEST_CASE("tryParsePacket handles exact buffer boundary sizes without off-by-one
     appendBytes(buffer, std::span<const uint8_t>(encoded.data(), sizeof(PacketHeader)));
     REQUIRE(buffer.size() == sizeof(PacketHeader));
 
+    size_t cursor = 0;
     PacketHeader parsedHeader{};
     std::vector<uint8_t> parsedPayload;
 
-    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
+    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
+    REQUIRE(cursor == 0);
     REQUIRE(buffer.size() == sizeof(PacketHeader));
 
     appendBytes(
@@ -503,11 +539,11 @@ TEST_CASE("tryParsePacket handles exact buffer boundary sizes without off-by-one
         std::span<const uint8_t>(encoded.data() + sizeof(PacketHeader), payload.size()));
     REQUIRE(buffer.size() == encoded.size());
 
-    REQUIRE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
+    REQUIRE(usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload));
     REQUIRE(parsedHeader.sequence == 650);
     REQUIRE(parsedHeader.payloadSize == payload.size());
     REQUIRE(parsedPayload == payload);
-    REQUIRE(buffer.empty());
+    REQUIRE(cursor == buffer.size());
 }
 
 TEST_CASE("tryParsePacket recovers from deterministic random noise between valid packets", "[protocol][parser]")
@@ -563,6 +599,7 @@ TEST_CASE("tryParsePacket recovers from deterministic random noise between valid
     appendBytes(buffer, noise2);
     appendBytes(buffer, packet3);
 
+    size_t cursor = 0;
     const std::array<uint32_t, 3> expectedSequences{660, 661, 662};
     const std::array<std::vector<uint8_t>, 3> expectedPayloads{payload1, payload2, payload3};
 
@@ -575,8 +612,10 @@ TEST_CASE("tryParsePacket recovers from deterministic random noise between valid
 
     while (parsedCount < expectedSequences.size() && attempts < maxAttempts)
     {
-        if (usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload))
+        const size_t before = cursor;
+        if (usblink::protocol::tryParsePacket(buffer, cursor, parsedHeader, parsedPayload))
         {
+            REQUIRE(cursor > before);
             REQUIRE(parsedHeader.sequence == expectedSequences[parsedCount]);
             REQUIRE(parsedPayload == expectedPayloads[parsedCount]);
             parsedCount++;
@@ -585,5 +624,5 @@ TEST_CASE("tryParsePacket recovers from deterministic random noise between valid
     }
 
     REQUIRE(parsedCount == expectedSequences.size());
-    REQUIRE(buffer.empty());
+    REQUIRE(cursor == buffer.size());
 }
