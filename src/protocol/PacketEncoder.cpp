@@ -116,6 +116,26 @@ namespace usblink::protocol
             buffer.begin() + sizeof(PacketHeader),
             buffer.begin() + totalSize);
 
+        PacketHeader tempHdr = hdr;
+        tempHdr.crc = 0;
+
+        std::vector<uint8_t> tempBuff;
+        tempBuff.reserve(totalSize);
+
+        const uint8_t *hdrPtr = reinterpret_cast<const uint8_t *>(&tempHdr);
+
+        tempBuff.insert(tempBuff.end(), hdrPtr, hdrPtr + sizeof(PacketHeader));
+
+        tempBuff.insert(tempBuff.end(), buffer.begin() + sizeof(PacketHeader), buffer.begin() + totalSize);
+
+        uint32_t computedCRC = computeCRC32(tempBuff);
+
+        if (computedCRC != hdr.crc)
+        {
+            buffer.erase(buffer.begin());
+            return false;
+        }
+
         outHeader = hdr;
 
         buffer.erase(buffer.begin(), buffer.begin() + totalSize);
