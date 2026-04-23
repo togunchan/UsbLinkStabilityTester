@@ -109,7 +109,19 @@ namespace usblink::protocol
         PacketHeader hdr;
         std::memcpy(&hdr, buffer.data(), sizeof(PacketHeader));
 
-        size_t totalSize = sizeof(PacketHeader) + hdr.payloadSize;
+        if (hdr.payloadSize > MAX_PAYLOAD_SIZE)
+        {
+            buffer.erase(buffer.begin());
+            return false;
+        }
+
+        size_t totalSize = sizeof(PacketHeader) + static_cast<size_t>(hdr.payloadSize);
+
+        if (totalSize < sizeof(PacketHeader))
+        {
+            buffer.erase(buffer.begin());
+            return false;
+        }
 
         if (buffer.size() < totalSize)
             return false;

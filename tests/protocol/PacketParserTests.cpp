@@ -17,6 +17,7 @@
 namespace
 {
     using usblink::protocol::MAGIC;
+    using usblink::protocol::MAX_PAYLOAD_SIZE;
     using usblink::protocol::PacketHeader;
 
     PacketHeader makeHeader(uint32_t sequence, uint64_t timestamp)
@@ -287,6 +288,66 @@ TEST_CASE("tryParsePacket parses zero-length payload packets", "[protocol][parse
     REQUIRE(parsedHeader.sequence == 610);
     REQUIRE(parsedHeader.payloadSize == 0);
     REQUIRE(parsedPayload.empty());
+    REQUIRE(buffer.empty());
+}
+
+TEST_CASE("tryParsePacket accepts payload at MAX_PAYLOAD_SIZE boundary", "[protocol][parser]")
+{
+    std::vector<uint8_t> maxPayload(MAX_PAYLOAD_SIZE);
+    for (std::size_t i = 0; i < maxPayload.size(); ++i)
+        maxPayload[i] = static_cast<uint8_t>((i * 13U + 7U) & 0xFFU);
+
+    const auto encoded = makePacket(615, 61'500ULL, maxPayload);
+
+    std::vector<uint8_t> buffer = encoded;
+    PacketHeader parsedHeader{};
+    std::vector<uint8_t> parsedPayload;
+
+    REQUIRE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
+    REQUIRE(parsedHeader.sequence == 615);
+    REQUIRE(parsedHeader.payloadSize == MAX_PAYLOAD_SIZE);
+    REQUIRE(parsedPayload == maxPayload);
+    REQUIRE(buffer.empty());
+}
+
+TEST_CASE("tryParsePacket rejects payloadSize above MAX_PAYLOAD_SIZE and resynchronizes", "[protocol][parser]")
+{
+    const std::vector<uint8_t> basePayload{0xAA, 0xBB, 0xCC, 0xDD};
+    auto oversizedHeaderPacket = makePacket(616, 61'600ULL, basePayload);
+
+    constexpr std::size_t payloadSizeOffset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint64_t);
+    const uint32_t oversized = static_cast<uint32_t>(MAX_PAYLOAD_SIZE + 1);
+    const uint8_t *oversizedBytes = reinterpret_cast<const uint8_t *>(&oversized);
+    for (std::size_t i = 0; i < sizeof(uint32_t); ++i)
+        oversizedHeaderPacket[payloadSizeOffset + i] = oversizedBytes[i];
+
+    const std::vector<uint8_t> validPayload{0x01, 0x03, 0x05};
+    const auto validPacket = makePacket(617, 61'700ULL, validPayload);
+
+    std::vector<uint8_t> buffer;
+    appendBytes(buffer, oversizedHeaderPacket);
+    appendBytes(buffer, validPacket);
+
+    PacketHeader parsedHeader{};
+    std::vector<uint8_t> parsedPayload;
+
+    const std::size_t initialSize = buffer.size();
+    REQUIRE_FALSE(usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload));
+    REQUIRE(buffer.size() == initialSize - 1);
+
+    bool recovered = false;
+    std::size_t attempts = 0;
+    const std::size_t maxAttempts = initialSize * 2;
+    while (!recovered && attempts < maxAttempts)
+    {
+        recovered = usblink::protocol::tryParsePacket(buffer, parsedHeader, parsedPayload);
+        attempts++;
+    }
+
+    REQUIRE(recovered);
+    REQUIRE(parsedHeader.sequence == 617);
+    REQUIRE(parsedHeader.payloadSize == validPayload.size());
+    REQUIRE(parsedPayload == validPayload);
     REQUIRE(buffer.empty());
 }
 

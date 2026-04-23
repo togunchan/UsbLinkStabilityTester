@@ -1,10 +1,12 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace usblink::protocol
 {
     constexpr uint32_t MAGIC = 0xAABBCCDD;
+    constexpr size_t MAX_PAYLOAD_SIZE = 4096;
 
 // Ensure deterministic byte layout for serialization (no padding between fields)
 // Without this, the compiler may insert hidden bytes, breaking protocol parsing

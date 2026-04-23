@@ -7,6 +7,14 @@
 
 namespace usblink::protocol
 {
+    enum class ParseState
+    {
+        SeekMagic,
+        WaitHeader,
+        WaitPayload,
+        Validate
+    };
+
     std::vector<uint8_t> encodePacket(const PacketHeader &header, std::span<const uint8_t> payload);
 
     size_t findMagicOffset(std::span<const uint8_t> buf, uint32_t magic);
