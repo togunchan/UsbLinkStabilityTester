@@ -210,6 +210,13 @@ namespace usblink::protocol
 
         outHeader = hdr;
         cursor += totalSize;
+
+        if (cursor >= COMPACT_THRESHOLD && cursor > buffer.size() / 2)
+        {
+            buffer.erase(buffer.begin(), buffer.begin() + cursor);
+            cursor = 0;
+        }
+
         return true;
     }
 } // namespace usblink::protocol
