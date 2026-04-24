@@ -6,10 +6,8 @@
 
 namespace usblink::protocol
 {
-    static uint32_t computeCRC32(std::span<const uint8_t> data)
+    static uint32_t crc32_update(std::span<const uint8_t> data, uint32_t crc = 0xFFFFFFFF)
     {
-        uint32_t crc = 0xFFFFFFFF;
-
         for (uint8_t byte : data)
         {
             crc ^= byte;
@@ -21,8 +19,7 @@ namespace usblink::protocol
                     crc >>= 1;
             }
         }
-
-        return ~crc;
+        return crc;
     }
 
     std::vector<uint8_t> encodePacket(const PacketHeader &header, std::span<const uint8_t> payload)
@@ -31,22 +28,11 @@ namespace usblink::protocol
         hdr.payloadSize = static_cast<uint32_t>(payload.size());
         hdr.crc = 0;
 
-        std::vector<uint8_t> temp;
-        temp.reserve(sizeof(PacketHeader) + payload.size());
-
         std::array<uint8_t, sizeof(PacketHeader)> headerBytes = std::bit_cast<std::array<uint8_t, sizeof(PacketHeader)>>(hdr);
 
-        temp.insert(
-            temp.end(),
-            headerBytes.begin(),
-            headerBytes.end());
-
-        temp.insert(
-            temp.end(),
-            payload.begin(),
-            payload.end());
-
-        uint32_t crc = computeCRC32(temp);
+        uint32_t crc = crc32_update(headerBytes, 0xFFFFFFFF);
+        crc = crc32_update(payload, crc);
+        crc = ~crc;
 
         hdr.crc = crc;
 
@@ -56,15 +42,8 @@ namespace usblink::protocol
 
         std::array<uint8_t, sizeof(PacketHeader)> finalHeaderBytes = std::bit_cast<std::array<uint8_t, sizeof(PacketHeader)>>(hdr);
 
-        buffer.insert(
-            buffer.end(),
-            finalHeaderBytes.begin(),
-            finalHeaderBytes.end());
-
-        buffer.insert(
-            buffer.end(),
-            payload.begin(),
-            payload.end());
+        buffer.insert(buffer.end(), finalHeaderBytes.begin(), finalHeaderBytes.end());
+        buffer.insert(buffer.end(), payload.begin(), payload.end());
 
         return buffer;
     }
@@ -141,7 +120,7 @@ namespace usblink::protocol
 
     //     tempBuff.insert(tempBuff.end(), buffer.begin() + sizeof(PacketHeader), buffer.begin() + totalSize);
 
-    //     uint32_t computedCRC = computeCRC32(tempBuff);
+    //     uint32_t computedCRC = crc32_update(tempBuff);
 
     //     if (computedCRC != hdr.crc)
     //     {
@@ -217,17 +196,14 @@ namespace usblink::protocol
                 PacketHeader tempHdr = hdr;
                 tempHdr.crc = 0;
 
-                std::vector<uint8_t> tempBuff;
-                tempBuff.reserve(totalSize);
-
                 auto hdrBytes = std::bit_cast<std::array<uint8_t, sizeof(PacketHeader)>>(tempHdr);
 
-                tempBuff.insert(tempBuff.end(), hdrBytes.begin(), hdrBytes.end());
-                tempBuff.insert(tempBuff.end(), outPayload.begin(), outPayload.end());
+                uint32_t crc = crc32_update(hdrBytes, 0xFFFFFFFF);
+                crc = crc32_update(std::span(buffer.begin() + cursor + sizeof(PacketHeader), buffer.begin() + cursor + totalSize), crc);
 
-                uint32_t computed = computeCRC32(tempBuff);
+                crc = ~crc;
 
-                if (computed != hdr.crc)
+                if (crc != hdr.crc)
                 {
                     cursor += 1;
                     state = ParseState::SeekMagic;
