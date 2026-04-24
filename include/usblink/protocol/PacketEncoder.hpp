@@ -21,6 +21,6 @@ namespace usblink::protocol
 
     bool tryParsePacket(std::vector<uint8_t> &buffer, PacketHeader &outHeader, std::vector<uint8_t> &outPayload);
 
-    bool tryParsePacket(std::vector<uint8_t> &buffer, size_t &cursor, PacketHeader &outHeader, std::vector<uint8_t> &outPayload);
+    bool tryParsePacket(std::vector<uint8_t> &buffer, size_t &cursor, ParseState &state, PacketHeader &outHeader, std::vector<uint8_t> &outPayload);
 
 } // namespace usblink::protocol
