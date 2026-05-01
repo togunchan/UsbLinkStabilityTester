@@ -48,94 +48,29 @@ namespace usblink::protocol
         return buffer;
     }
 
-    size_t findMagicOffset(std::span<const uint8_t> buf, uint32_t magic)
+    size_t findMagicOffset(const core::RingBuffer &buffer, uint32_t magic)
     {
         std::array<uint8_t, sizeof(uint32_t)> m = std::bit_cast<std::array<uint8_t, sizeof(uint32_t)>>(magic);
 
-        if (buf.size() < sizeof(uint32_t))
-            return static_cast<size_t>(-1);
+        if (buffer.size() < sizeof(uint32_t))
+            return std::numeric_limits<size_t>::max();
 
-        for (size_t i = 0; i <= buf.size() - sizeof(uint32_t); ++i)
+        for (size_t i = 0; i <= buffer.size() - sizeof(uint32_t); ++i)
         {
-            if (buf[i] == m[0] &&
-                buf[i + 1] == m[1] &&
-                buf[i + 2] == m[2] &&
-                buf[i + 3] == m[3])
+            if (buffer[i] == m[0] &&
+                buffer[i + 1] == m[1] &&
+                buffer[i + 2] == m[2] &&
+                buffer[i + 3] == m[3])
             {
                 return i;
             }
         }
 
         // -1 cast to size_t becomes max value (all bits set to 1) -> used as "not found"
-        return static_cast<size_t>(-1);
+        return std::numeric_limits<size_t>::max();
     }
 
-    // Deprecated
-    // bool tryParsePacket(std::vector<uint8_t> &buffer, PacketHeader &outHeader, std::vector<uint8_t> &outPayload)
-    // {
-    //     size_t offset = findMagicOffset(buffer, MAGIC);
-
-    //     if (offset == static_cast<size_t>(-1))
-    //         return false;
-
-    //     if (offset > 0)
-    //         buffer.erase(buffer.begin(), buffer.begin() + offset);
-
-    //     if (buffer.size() < sizeof(PacketHeader))
-    //         return false;
-
-    //     PacketHeader hdr;
-    //     std::memcpy(&hdr, buffer.data(), sizeof(PacketHeader));
-
-    //     if (hdr.payloadSize > MAX_PAYLOAD_SIZE)
-    //     {
-    //         buffer.erase(buffer.begin());
-    //         return false;
-    //     }
-
-    //     size_t totalSize = sizeof(PacketHeader) + static_cast<size_t>(hdr.payloadSize);
-
-    //     if (totalSize < sizeof(PacketHeader))
-    //     {
-    //         buffer.erase(buffer.begin());
-    //         return false;
-    //     }
-
-    //     if (buffer.size() < totalSize)
-    //         return false;
-
-    //     outPayload.assign(
-    //         buffer.begin() + sizeof(PacketHeader),
-    //         buffer.begin() + totalSize);
-
-    //     PacketHeader tempHdr = hdr;
-    //     tempHdr.crc = 0;
-
-    //     std::vector<uint8_t> tempBuff;
-    //     tempBuff.reserve(totalSize);
-
-    //     std::array<uint8_t, sizeof(PacketHeader)> headerBytes = std::bit_cast<std::array<uint8_t, sizeof(PacketHeader)>>(tempHdr);
-
-    //     tempBuff.insert(tempBuff.end(), headerBytes.begin(), headerBytes.end());
-
-    //     tempBuff.insert(tempBuff.end(), buffer.begin() + sizeof(PacketHeader), buffer.begin() + totalSize);
-
-    //     uint32_t computedCRC = crc32_update(tempBuff);
-
-    //     if (computedCRC != hdr.crc)
-    //     {
-    //         buffer.erase(buffer.begin());
-    //         return false;
-    //     }
-
-    //     outHeader = hdr;
-
-    //     buffer.erase(buffer.begin(), buffer.begin() + totalSize);
-
-    //     return true;
-    // }
-
-    bool tryParsePacket(std::vector<uint8_t> &buffer, size_t &cursor, ParseState &state, PacketHeader &hdr, PacketHeader &outHeader, std::vector<uint8_t> &outPayload)
+    bool tryParsePacket(core::RingBuffer &buffer, ParseState &state, PacketHeader &hdr, PacketHeader &outHeader, std::vector<uint8_t> &outPayload)
     {
         size_t totalSize = 0;
 
@@ -145,29 +80,31 @@ namespace usblink::protocol
             {
             case ParseState::SeekMagic:
             {
-                if (cursor >= buffer.size())
+                size_t offset = findMagicOffset(buffer, MAGIC);
+
+                if (offset == std::numeric_limits<size_t>::max())
                     return false;
 
-                size_t offset = findMagicOffset(std::span(buffer.begin() + cursor, buffer.end()), MAGIC);
-
-                if (offset == static_cast<size_t>(-1))
-                    return false;
-
-                cursor += offset;
+                buffer.consume(offset);
                 state = ParseState::WaitHeader;
                 break;
             }
 
             case ParseState::WaitHeader:
             {
-                if (buffer.size() - cursor < sizeof(PacketHeader))
+                if (buffer.size() < sizeof(PacketHeader))
                     return false;
 
-                std::memcpy(&hdr, buffer.data() + cursor, sizeof(PacketHeader));
+                std::array<uint8_t, sizeof(PacketHeader)> tmp;
+
+                for (size_t i = 0; i < tmp.size(); i++)
+                    tmp[i] = buffer[i];
+
+                hdr = std::bit_cast<PacketHeader>(tmp);
 
                 if (hdr.payloadSize > MAX_PAYLOAD_SIZE)
                 {
-                    cursor += 1;
+                    buffer.consume(1);
                     state = ParseState::SeekMagic;
                     break;
                 }
@@ -180,7 +117,7 @@ namespace usblink::protocol
             {
                 totalSize = sizeof(PacketHeader) + hdr.payloadSize;
 
-                if (buffer.size() - cursor < totalSize)
+                if (buffer.size() < totalSize)
                     return false;
 
                 state = ParseState::Validate;
@@ -189,9 +126,13 @@ namespace usblink::protocol
 
             case ParseState::Validate:
             {
-                outPayload.assign(
-                    buffer.begin() + cursor + sizeof(PacketHeader),
-                    buffer.begin() + cursor + totalSize);
+                outPayload.clear();
+                outPayload.reserve(hdr.payloadSize);
+
+                for (size_t i = 0; i < hdr.payloadSize; ++i)
+                {
+                    outPayload.push_back(buffer[sizeof(PacketHeader) + i]);
+                }
 
                 PacketHeader tempHdr = hdr;
                 tempHdr.crc = 0;
@@ -199,25 +140,22 @@ namespace usblink::protocol
                 auto hdrBytes = std::bit_cast<std::array<uint8_t, sizeof(PacketHeader)>>(tempHdr);
 
                 uint32_t crc = crc32_update(hdrBytes, 0xFFFFFFFF);
-                crc = crc32_update(std::span(buffer.begin() + cursor + sizeof(PacketHeader), buffer.begin() + cursor + totalSize), crc);
-
+                for (size_t i = 0; i < hdr.payloadSize; ++i)
+                {
+                    uint8_t b = buffer[sizeof(PacketHeader) + i];
+                    crc = crc32_update(std::span(&b, 1), crc);
+                }
                 crc = ~crc;
 
                 if (crc != hdr.crc)
                 {
-                    cursor += 1;
+                    buffer.consume(1);
                     state = ParseState::SeekMagic;
                     return false;
                 }
 
                 outHeader = hdr;
-                cursor += totalSize;
-
-                if (cursor >= COMPACT_THRESHOLD && cursor > buffer.size() / 2)
-                {
-                    buffer.erase(buffer.begin(), buffer.begin() + cursor);
-                    cursor = 0;
-                }
+                buffer.consume(totalSize);
 
                 state = ParseState::SeekMagic;
                 return true;

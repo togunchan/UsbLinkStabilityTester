@@ -10,6 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_library(usblink
     src/common/Dummy.cpp
     src/protocol/PacketEncoder.cpp
+    src/core/RingBuffer.cpp
 )
 
 target_include_directories(usblink
