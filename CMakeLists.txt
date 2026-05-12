@@ -10,6 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_library(usblink
     src/common/Dummy.cpp
     src/protocol/PacketEncoder.cpp
+    src/protocol/PayloadGenerator.cpp
     src/core/RingBuffer.cpp
 )
 
@@ -52,6 +53,7 @@ if(BUILD_TESTING)
 
     add_executable(usblink_tests
         tests/protocol/PacketParserTests.cpp
+        tests/protocol/PayloadGeneratorTests.cpp
     )
 
     target_link_libraries(usblink_tests
@@ -60,8 +62,6 @@ if(BUILD_TESTING)
             Catch2::Catch2WithMain
     )
 
-    add_test(
-        NAME usblink_tests
-        COMMAND usblink_tests
-    )
+    include(Catch)
+    catch_discover_tests(usblink_tests)
 endif()
