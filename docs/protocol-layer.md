@@ -1,26 +1,27 @@
-# v0.2 Protocol Layer
+# Protocol Layer
 
-## 1. Overview
-This layer adds packet framing and integrity checks on top of raw serial transport.
+## Overview
 
-Transport only provides raw bytes. It does not tell us where a packet starts or ends. It also cannot tell us if a packet was corrupted in the middle.
+The protocol layer reconstructs validated packets from a raw serial byte stream. It is designed around deterministic behavior under fragmentation, corruption, and alignment loss.
 
-So the protocol layer does four things:
-- defines a fixed binary header,
-- stores payload size in that header,
-- validates each packet with CRC32,
-- recovers from noise by resynchronizing on magic bytes.
+Transport code provides bytes only. It does not know where packets start, whether a frame is complete, or whether payload bytes were corrupted. The protocol layer owns those decisions:
 
-The implementation is stream-first. That is important because serial input arrives in arbitrary chunks.
+- identify packet boundaries with a fixed magic value,
+- wait for complete headers and payloads across arbitrary read boundaries,
+- reject malformed headers before trusting declared frame length,
+- validate candidate frames with CRC32,
+- recover by resynchronizing on the next plausible packet boundary,
+- expose parser behavior through counters.
 
-## 2. Packet Format
-On the wire, a packet is:
+## Packet Format
+
+Packets are serialized as:
 
 ```text
 [HEADER][PAYLOAD]
 ```
 
-Header type is `PacketHeader`:
+`PacketHeader`:
 
 ```text
 Offset  Size  Field
@@ -32,156 +33,170 @@ Offset  Size  Field
 ```
 
 Field meaning:
+
 - `magic` (`0xAABBCCDD`): synchronization marker.
-- `sequence`: packet order / tracking field.
+- `sequence`: packet order field used by `SequenceTracker`.
 - `timestamp`: sender-side timing metadata.
 - `payloadSize`: payload length in bytes.
-- `crc`: CRC32 of header+payload, with `crc` field zeroed during calculation.
+- `crc`: CRC32 of header plus payload, with the CRC field zeroed during calculation.
 
-`PacketHeader` is packed with `#pragma pack(push, 1)`. That avoids padding and keeps byte layout deterministic.
+The header is packed with `#pragma pack(push, 1)` to avoid compiler padding. Current wire byte order follows native layout.
 
-Why this format:
-- fixed header makes parsing predictable,
-- variable payload keeps it flexible,
-- CRC protects against silent corruption.
+## Encoding
 
-## 3. Encoding Logic
-`encodePacket()` builds a packet in two phases.
+`encodePacket()` builds a deterministic `[header][payload]` byte vector:
 
-1. Copy the input header to a local `hdr`.
-2. Set `hdr.payloadSize` from payload length.
-3. Set `hdr.crc = 0`.
-4. Build temporary bytes: `[hdr-with-zero-crc][payload]`.
-5. Compute CRC32 over that temporary block.
-6. Write computed CRC into `hdr.crc`.
-7. Build final bytes: `[hdr-with-real-crc][payload]`.
+1. Copy the caller-provided header.
+2. Set `payloadSize` from the payload span.
+3. Set `crc` to zero.
+4. Serialize the packed header with `std::bit_cast`.
+5. Compute CRC32 over the zero-CRC header bytes and payload.
+6. Write the computed CRC into the header.
+7. Serialize the final header followed by the payload.
 
-The header is serialized by viewing it as raw bytes (`reinterpret_cast<const uint8_t*>`). This works because the struct is tightly packed and has no padding.
+The CRC implementation is reflected CRC32:
 
-`crc` is zero during hashing so both encoder and parser hash exactly the same content. If CRC were included as-is, hashing would be self-referential.
-
-Temporary buffers are used for clarity and deterministic behavior. The current CRC function expects a contiguous span.
-
-## 4. CRC Logic
-`computeCRC32()` implements reflected CRC32:
 - initial value: `0xFFFFFFFF`
 - polynomial: `0xEDB88320`
-- final step: `~crc`
+- final value: bitwise inversion
 
-It is a bitwise implementation (8 inner iterations per input byte), without lookup tables.
+The implementation is bitwise and explicit. It favors clarity and deterministic behavior over lookup-table throughput.
 
-Why this matters in practice:
-- serial links can return bytes that look valid structurally but contain damage,
-- CRC is the final gate before accepting a packet.
-- Without CRC, a corrupted payload could still look like a valid packet.
+## Parser State Machine
 
-This version favors simple, explicit code over maximum CRC throughput.
-
-## 5. Stream Parsing Model
-`tryParsePacket()` parses from a mutable `std::vector<uint8_t>& buffer`.
-
-That buffer is a rolling stream window. Caller appends bytes from serial reads, then calls parser repeatedly.
-
-Model rules:
-- input is a continuous byte stream,
-- parser may need multiple calls before one packet becomes complete,
-- parser returns at most one packet per call,
-- parser mutates buffer by erasing consumed or invalid bytes.
+`tryParsePacket()` parses from `core::RingBuffer` and carries explicit parser state between calls:
 
 ```text
-read chunk -> append to buffer -> tryParsePacket() -> repeat
+SeekMagic -> WaitHeader -> WaitPayload -> Validate
+     ^                                      |
+     |                                      |
+     +----------- recovery / accept --------+
 ```
 
-## 6. Packet Parsing Steps (IMPORTANT)
-`tryParsePacket()` flow:
+Inputs and outputs:
 
-1. **Find candidate start**
-   - Call `findMagicOffset(buffer, MAGIC)`.
-   - If magic is not found, return `false`.
+- `RingBuffer& buffer`: rolling stream storage owned by the caller.
+- `ParseState& state`: parser state retained across calls.
+- `PacketHeader& hdr`: working header retained while waiting for payload.
+- `PacketHeader& outHeader`: accepted packet header.
+- `std::vector<uint8_t>& outPayload`: accepted packet payload.
+- `ProtocolStats& stats`: parser accounting.
 
-2. **Drop bytes before magic**
-   - If magic is at offset `> 0`, erase leading garbage.
+The parser returns at most one packet per call.
 
-3. **Check header completeness**
-   - If `buffer.size() < sizeof(PacketHeader)`, return `false`.
+### `SeekMagic`
 
-4. **Read header**
-   - Copy first header bytes into local `PacketHeader hdr` using `memcpy`.
+The parser scans for `MAGIC`.
 
-5. **Check full frame size**
-   - Compute `totalSize = sizeof(PacketHeader) + hdr.payloadSize`.
-   - If buffer does not contain `totalSize` bytes yet, return `false`.
+If magic is found at a nonzero offset, bytes before it are consumed and counted as discarded. If no complete magic is found, the parser consumes all but the last three bytes. Preserving three bytes allows a magic value split across reads to complete later.
 
-6. **Prepare CRC verification data**
-   - Copy payload candidate into `outPayload`.
-   - Copy `hdr` to temp header and set temp `crc = 0`.
-   - Build temporary byte block `[tempHeader][payload]`.
+### `WaitHeader`
 
-7. **Validate CRC**
-   - Compute CRC32 on the temporary block.
-   - Compare with `hdr.crc`.
+The parser waits until `sizeof(PacketHeader)` bytes are buffered. It then copies the candidate header out of the ring buffer.
 
-8. **CRC failed**
-   - Erase only one byte from buffer start.
-   - Return `false`.
+If `payloadSize > MAX_PAYLOAD_SIZE`, the header is treated as malformed. The parser consumes one byte, records the malformed header and invalid packet, returns to `SeekMagic`, and continues recovery.
 
-9. **CRC passed**
-   - Write `outHeader = hdr`.
-   - Erase full packet (`totalSize` bytes) from buffer.
-   - Return `true`.
+### `WaitPayload`
 
-Short parser state view:
+The parser waits until the complete declared frame is buffered:
 
 ```text
-seek magic -> wait header -> wait payload -> validate crc
+sizeof(PacketHeader) + payloadSize
 ```
 
-## 7. Resynchronization Logic
-When CRC check fails, parser drops one byte and tries again on next call.
+No payload bytes are accepted or scanned as independent packets while the candidate frame is incomplete.
 
-Why one byte, not whole frame:
-- after corruption, alignment is unknown,
-- dropping too much can skip a real packet start,
-- one-byte sliding eventually tests every alignment.
-- This guarantees that the parser will eventually find a valid packet if one exists in the stream.
+### `Validate`
 
-This is slower in heavy noise, but it is robust. If valid packets continue to arrive, parser can recover.
+The parser computes CRC over a temporary header with `crc = 0` and the candidate payload bytes from the ring buffer.
 
-## 8. Edge Cases (from tests)
-Catch2 tests in `tests/protocol/PacketParserTests.cpp` cover these cases:
+On success:
+
+- copy header and payload to outputs,
+- consume the full frame,
+- reset state to `SeekMagic`,
+- increment valid packet and payload counters,
+- return `true`.
+
+On failure:
+
+- consume one byte,
+- reset state to `SeekMagic`,
+- increment CRC failure, invalid packet, and discarded byte counters,
+- return `false`.
+
+## Recovery Semantics
+
+Recovery is intentionally conservative:
+
+- garbage before magic is discarded only up to the next candidate magic,
+- CRC failure advances by one byte,
+- malformed oversized headers advance by one byte,
+- failed magic scans preserve a partial suffix that could become a complete magic on a later read.
+
+One-byte sliding recovery is slower in heavy noise, but it avoids skipping over a valid packet start after corruption. This is the intended tradeoff for diagnostics: predictable recovery semantics are more valuable than optimistic skipping.
+
+## Observability
+
+`ProtocolStats` records parser behavior:
+
+```text
+parsedPackets       accepted packets emitted by the parser
+validPackets        CRC-valid packets
+invalidPackets      rejected candidate frames
+crcFailures         candidate frames rejected by CRC
+malformedHeaders    headers rejected before payload validation
+resyncEvents        parser realignment events
+discardedBytes      bytes consumed during recovery
+bytesReceived       caller-owned ingress counter
+totalPayloadBytes   accepted payload bytes
+```
+
+`bytesReceived` is intentionally not incremented by the parser because the parser does not perform reads from the transport. Integration code can update it when bytes enter the ring buffer.
+
+## Sequence Tracking
+
+`SequenceTracker` is separate from parsing. It should observe sequence numbers only after CRC validation.
+
+Behavior:
+
+- first observed packet initializes `expectedSequence`,
+- in-order packets advance `expectedSequence`,
+- forward jumps count missing sequence values as lost packets,
+- older sequence values count as duplicate or reordered packets,
+- duplicate/reordered packets do not advance expected sequence,
+- `uint32_t` wraparound is handled by unsigned arithmetic.
+
+This separation keeps frame integrity (`tryParsePacket`) distinct from delivery behavior (`SequenceTracker`).
+
+## Validation Coverage
+
+Catch2 tests in `tests/protocol` cover:
 
 - valid packet parse,
-- partial header,
-- partial payload,
-- garbage before valid packet,
-- CRC mismatch and resync,
-- back-to-back packets (one packet per call),
-- chunked / byte-by-byte stream input,
-- magic pattern inside payload,
-- zero-length payload,
-- large payload (2048 bytes),
+- partial header and partial payload arrival,
+- stream-split and byte-chunked input,
+- back-to-back packets,
+- magic values inside payload data,
+- zero-length payloads,
+- large payloads and `MAX_PAYLOAD_SIZE`,
+- oversized payload header rejection,
+- CRC mismatch recovery,
 - multiple consecutive CRC failures,
 - corrupted header fields,
-- exact boundary sizes (`sizeof(header)` and exact `totalSize`),
-- deterministic random noise between valid packets.
+- deterministic random noise between valid packets,
+- partial magic preservation,
+- parser metrics accounting,
+- sequence gaps, duplicates, reordering, mixed traffic, and wraparound.
 
-These tests verify correctness under real stream behavior, not ideal message boundaries.
+These tests define parser behavior against stream conditions rather than ideal message boundaries.
 
-## 9. Limitations
-Current design is correct for v0.2, but there are known costs:
+## Known Constraints
 
-- front `vector.erase()` is O(n),
-- CRC path builds temporary buffers,
-- payload is copied into `outPayload`,
-- wire byte order is based on native memory layout. This means packets are not portable across different endianness architectures,
-- no strict built-in max payload bound,
-- CRC is recomputed per parse attempt.
+- Payload bytes are copied into `outPayload` on acceptance.
+- CRC validation reads candidate payload bytes from the ring buffer one byte at a time.
+- Wire byte order is native-layout dependent.
+- The parser requires caller-managed ring buffer capacity.
+- `bytesReceived` is an integration counter, not parser-owned state.
 
-## 10. Possible Improvements
-1. Use ring buffer or head index to avoid O(n) front erases.
-2. Add zero-copy payload view path.
-3. Compute CRC directly on existing buffer windows to reduce temporary allocations.
-4. Define explicit wire endianness for cross-platform consistency.
-5. Add hard payload size limits for early rejection.
-6. Formalize parser states (`SeekMagic`, `WaitHeader`, `WaitPayload`, `Validate`).
-7. Reserve version/flags fields for protocol evolution.
+Potential future work includes explicit wire endianness, zero-copy payload views, CRC over contiguous ring-buffer windows, richer diagnostics aggregation, and additional transport backends.
