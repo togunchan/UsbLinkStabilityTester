@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Packet.hpp"
+#include "ProtocolStats.hpp"
 #include "usblink/core/RingBuffer.hpp"
 
 #include <vector>
@@ -20,6 +21,8 @@ namespace usblink::protocol
 
     size_t findMagicOffset(const core::RingBuffer &buffer, uint32_t magic);
 
-    bool tryParsePacket(core::RingBuffer &buffer, ParseState &state, PacketHeader &hdr, PacketHeader &outHeader, std::vector<uint8_t> &outPayload);
+    bool tryParsePacket(core::RingBuffer &buffer, ParseState &state, PacketHeader &hdr,
+                        PacketHeader &outHeader, std::vector<uint8_t> &outPayload,
+                        ProtocolStats &stats);
 
 } // namespace usblink::protocol

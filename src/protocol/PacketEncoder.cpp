@@ -1,8 +1,10 @@
 #include "usblink/protocol/PacketEncoder.hpp"
+#include "usblink/protocol/ProtocolStats.hpp"
 
-#include <cstring>
-#include <bit>
 #include <array>
+#include <bit>
+#include <cstring>
+#include <vector>
 
 namespace usblink::protocol
 {
@@ -28,7 +30,8 @@ namespace usblink::protocol
         hdr.payloadSize = static_cast<uint32_t>(payload.size());
         hdr.crc = 0;
 
-        std::array<uint8_t, sizeof(PacketHeader)> headerBytes = std::bit_cast<std::array<uint8_t, sizeof(PacketHeader)>>(hdr);
+        std::array<uint8_t, sizeof(PacketHeader)> headerBytes =
+            std::bit_cast<std::array<uint8_t, sizeof(PacketHeader)>>(hdr);
 
         uint32_t crc = crc32_update(headerBytes, 0xFFFFFFFF);
         crc = crc32_update(payload, crc);
@@ -40,7 +43,8 @@ namespace usblink::protocol
         // [HEADER][PAYLOAD]
         buffer.reserve(sizeof(PacketHeader) + payload.size());
 
-        std::array<uint8_t, sizeof(PacketHeader)> finalHeaderBytes = std::bit_cast<std::array<uint8_t, sizeof(PacketHeader)>>(hdr);
+        std::array<uint8_t, sizeof(PacketHeader)> finalHeaderBytes =
+            std::bit_cast<std::array<uint8_t, sizeof(PacketHeader)>>(hdr);
 
         buffer.insert(buffer.end(), finalHeaderBytes.begin(), finalHeaderBytes.end());
         buffer.insert(buffer.end(), payload.begin(), payload.end());
@@ -50,16 +54,15 @@ namespace usblink::protocol
 
     size_t findMagicOffset(const core::RingBuffer &buffer, uint32_t magic)
     {
-        std::array<uint8_t, sizeof(uint32_t)> m = std::bit_cast<std::array<uint8_t, sizeof(uint32_t)>>(magic);
+        std::array<uint8_t, sizeof(uint32_t)> m =
+            std::bit_cast<std::array<uint8_t, sizeof(uint32_t)>>(magic);
 
         if (buffer.size() < sizeof(uint32_t))
             return std::numeric_limits<size_t>::max();
 
         for (size_t i = 0; i <= buffer.size() - sizeof(uint32_t); ++i)
         {
-            if (buffer[i] == m[0] &&
-                buffer[i + 1] == m[1] &&
-                buffer[i + 2] == m[2] &&
+            if (buffer[i] == m[0] && buffer[i + 1] == m[1] && buffer[i + 2] == m[2] &&
                 buffer[i + 3] == m[3])
             {
                 return i;
@@ -70,7 +73,9 @@ namespace usblink::protocol
         return std::numeric_limits<size_t>::max();
     }
 
-    bool tryParsePacket(core::RingBuffer &buffer, ParseState &state, PacketHeader &hdr, PacketHeader &outHeader, std::vector<uint8_t> &outPayload)
+    bool tryParsePacket(core::RingBuffer &buffer, ParseState &state, PacketHeader &hdr,
+                        PacketHeader &outHeader, std::vector<uint8_t> &outPayload,
+                        ProtocolStats &stats)
     {
         size_t totalSize = 0;
 
@@ -83,7 +88,25 @@ namespace usblink::protocol
                 size_t offset = findMagicOffset(buffer, MAGIC);
 
                 if (offset == std::numeric_limits<size_t>::max())
+                {
+                    constexpr std::size_t magicSize = sizeof(uint32_t);
+                    constexpr std::size_t preserveBytes = magicSize - 1;
+
+                    if (buffer.size() > preserveBytes)
+                    {
+                        const std::size_t discardCount = buffer.size() - preserveBytes;
+                        buffer.consume(discardCount);
+                        stats.resyncEvents++;
+                        stats.discardedBytes += discardCount;
+                    }
                     return false;
+                }
+
+                if (offset > 0)
+                {
+                    stats.resyncEvents++;
+                    stats.discardedBytes += offset;
+                }
 
                 buffer.consume(offset);
                 state = ParseState::WaitHeader;
@@ -106,6 +129,9 @@ namespace usblink::protocol
                 {
                     buffer.consume(1);
                     state = ParseState::SeekMagic;
+                    stats.malformedHeaders++;
+                    stats.invalidPackets++;
+                    stats.discardedBytes++;
                     break;
                 }
 
@@ -151,6 +177,10 @@ namespace usblink::protocol
                 {
                     buffer.consume(1);
                     state = ParseState::SeekMagic;
+
+                    stats.crcFailures++;
+                    stats.discardedBytes++;
+                    stats.invalidPackets++;
                     return false;
                 }
 
@@ -158,6 +188,9 @@ namespace usblink::protocol
                 buffer.consume(totalSize);
 
                 state = ParseState::SeekMagic;
+                stats.parsedPackets++;
+                stats.validPackets++;
+                stats.totalPayloadBytes += hdr.payloadSize;
                 return true;
             }
             } // switch (state)
