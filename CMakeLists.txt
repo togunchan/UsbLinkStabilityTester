@@ -12,6 +12,7 @@ add_library(usblink
     src/protocol/PacketEncoder.cpp
     src/protocol/PayloadGenerator.cpp
     src/protocol/SequenceTracker.cpp
+    src/runtime/RuntimeSession.cpp
     src/core/RingBuffer.cpp
 )
 
@@ -56,6 +57,7 @@ if(BUILD_TESTING)
         tests/protocol/PacketParserTests.cpp
         tests/protocol/PayloadGeneratorTests.cpp
         tests/protocol/SequenceTrackerTests.cpp
+        tests/runtime/RuntimeSessionTests.cpp
     )
 
     target_link_libraries(usblink_tests
